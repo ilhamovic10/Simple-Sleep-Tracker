@@ -24,12 +24,17 @@ const App: React.FC = () => {
   const [sleepGoal, setSleepGoal] = useState<number>(8 * 60 * 60 * 1000); // in milliseconds
   const [selectedAlarm, setSelectedAlarm] = useState<string>('Beep');
   const [snoozeDuration, setSnoozeDuration] = useState<number>(5); // in minutes
+  const [areSettingsConfirmed, setAreSettingsConfirmed] = useState<boolean>(true);
+  const [settingsReminder, setSettingsReminder] = useState<string>('');
+
 
   // AI Summary
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [summary, setSummary] = useState<string>('');
 
-  const alarmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const alarmIntervalRef = useRef<number | null>(null);
+  const snoozeTimeoutRef = useRef<number | null>(null);
 
   // Load state from localStorage on mount
   useEffect(() => {
@@ -42,6 +47,15 @@ const App: React.FC = () => {
       if (savedGoal) {
         setSleepGoal(parseInt(savedGoal, 10) || (8 * 60 * 60 * 1000));
       }
+      const savedAlarm = localStorage.getItem('selectedAlarm');
+      if (savedAlarm) {
+        setSelectedAlarm(savedAlarm);
+      }
+      const savedSnooze = localStorage.getItem('snoozeDuration');
+      if (savedSnooze) {
+          setSnoozeDuration(parseInt(savedSnooze, 10));
+      }
+
     } catch (error) {
       console.error("Failed to load data from localStorage", error);
     }
@@ -52,32 +66,81 @@ const App: React.FC = () => {
     try {
       localStorage.setItem('sleepHistory', JSON.stringify(history));
       localStorage.setItem('sleepGoal', sleepGoal.toString());
+      localStorage.setItem('selectedAlarm', selectedAlarm);
+      localStorage.setItem('snoozeDuration', snoozeDuration.toString());
     } catch (error) {
       console.error("Failed to save data to localStorage", error);
     }
-  }, [history, sleepGoal]);
-  
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      alarmAudioRef.current = new Audio(`/sounds/${selectedAlarm}.mp3`);
-      alarmAudioRef.current.loop = true;
-    }
-  }, [selectedAlarm]);
+  }, [history, sleepGoal, selectedAlarm, snoozeDuration]);
 
   const playAlarm = () => {
-    if (alarmAudioRef.current) {
-        alarmAudioRef.current.play().catch(e => console.error("Error playing audio:", e));
-    }
+    if (alarmIntervalRef.current) return;
+
+    const playSound = () => {
+        if (typeof window === 'undefined') return;
+
+        if (!audioContextRef.current) {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        const audioCtx = audioContextRef.current;
+        if (!audioCtx) return;
+        // Check if context is suspended (autoplay policies)
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
+        switch (selectedAlarm) {
+            case 'Ascending':
+                oscillator.type = 'sawtooth';
+                oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
+                oscillator.frequency.linearRampToValueAtTime(880, audioCtx.currentTime + 1);
+                gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
+                gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1);
+                break;
+            case 'Digital':
+                oscillator.type = 'square';
+                oscillator.frequency.setValueAtTime(1000, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime + 0.05);
+                oscillator.frequency.setValueAtTime(1200, audioCtx.currentTime + 0.1);
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime + 0.1);
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime + 0.15);
+                break;
+            case 'Beep':
+            default:
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(980, audioCtx.currentTime);
+                gainNode.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);
+                gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
+                break;
+        }
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + 1);
+    };
+
+    playSound();
+    alarmIntervalRef.current = window.setInterval(playSound, 1200);
   };
 
   const stopAlarm = () => {
-    if (alarmAudioRef.current) {
-      alarmAudioRef.current.pause();
-      alarmAudioRef.current.currentTime = 0;
+    if (alarmIntervalRef.current) {
+        clearInterval(alarmIntervalRef.current);
+        alarmIntervalRef.current = null;
     }
   };
 
   const handleStartSleep = () => {
+    if (!areSettingsConfirmed) {
+        setSettingsReminder('Please confirm your settings before starting.');
+        return;
+    }
+    setSettingsReminder('');
     setIsSleeping(true);
     setStartTime(new Date().toISOString());
   };
@@ -98,6 +161,11 @@ const App: React.FC = () => {
     setStartTime(null);
     setIsAlarmRinging(false);
     stopAlarm();
+
+    if (snoozeTimeoutRef.current) {
+        clearTimeout(snoozeTimeoutRef.current);
+        snoozeTimeoutRef.current = null;
+    }
   };
   
   const handleTriggerAlarm = () => {
@@ -111,10 +179,25 @@ const App: React.FC = () => {
     stopAlarm();
     setIsAlarmRinging(false);
     
-    console.log(`Snoozing for ${snoozeDuration} minutes.`);
-    // For simplicity in this example, snoozing just stops the alarm and logs the user as awake.
-    handleWakeUp();
+    if (snoozeTimeoutRef.current) {
+        clearTimeout(snoozeTimeoutRef.current);
+    }
+    const snoozeMs = snoozeDuration * 60 * 1000;
+    snoozeTimeoutRef.current = window.setTimeout(() => {
+        if(isSleeping) {
+            handleTriggerAlarm();
+        }
+    }, snoozeMs);
   };
+
+  const handleConfirmSettings = (newSettings: {goal: number, alarm: string, snooze: number}) => {
+    setSleepGoal(newSettings.goal);
+    setSelectedAlarm(newSettings.alarm);
+    setSnoozeDuration(newSettings.snooze);
+    setAreSettingsConfirmed(true);
+    setSettingsReminder('');
+  };
+
 
   const handleGenerateSummary = async () => {
     if (history.length === 0) {
@@ -130,10 +213,11 @@ const App: React.FC = () => {
     ).join('\n');
     
     const prompt = `
-    Based on the following sleep data for the last 7 sessions, provide a friendly and insightful summary of the user's sleep patterns. 
+    Based on the following sleep data for the last 7 sessions, act as a friendly sleep coach.
     The user's sleep goal is ${formatDurationForLog(sleepGoal)}.
-    Mention consistency, whether they are meeting their goal, and offer one simple, actionable tip for improvement.
-    Format the output as markdown.
+    Analyze their sleep patterns, clearly stating if their sleep is 'enough', 'not enough', or 'lacking' based on their goal.
+    Offer several specific, actionable suggestions for how to improve their sleep.
+    Format the output as markdown with headings and bullet points for readability.
 
     Sleep Data:
     ${formattedHistory}
@@ -164,6 +248,11 @@ const App: React.FC = () => {
       <main className="container mx-auto p-4 md:p-8">
         {currentPage === 'tracker' && (
             <div className="flex flex-col items-center gap-8 w-full max-w-2xl mx-auto">
+                {settingsReminder && (
+                    <div className="w-full p-3 text-center bg-red-500/20 border border-red-500/50 rounded-lg text-red-300">
+                        {settingsReminder}
+                    </div>
+                )}
                 <SleepTracker
                     isSleeping={isSleeping}
                     startTime={startTime}
@@ -178,11 +267,10 @@ const App: React.FC = () => {
                     notificationsEnabled={notificationsEnabled}
                     onToggleNotifications={setNotificationsEnabled}
                     sleepGoal={sleepGoal}
-                    onSleepGoalChange={setSleepGoal}
                     selectedAlarm={selectedAlarm}
-                    onAlarmChange={setSelectedAlarm}
                     snoozeDuration={snoozeDuration}
-                    onSnoozeDurationChange={setSnoozeDuration}
+                    onConfirmSettings={handleConfirmSettings}
+                    onSettingsChange={() => setAreSettingsConfirmed(false)}
                     onGenerateSummary={handleGenerateSummary}
                     isGenerating={isGenerating}
                     summary={summary}
