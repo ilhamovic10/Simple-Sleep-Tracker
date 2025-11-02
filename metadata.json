@@ -1,0 +1,5 @@
+{
+  "name": "Simple Sleep Tracker",
+  "description": "A simple, minimalist app to track your sleep patterns and view your sleep history with a visual chart. All data is stored locally on your device.",
+  "requestFramePermissions": []
+}
